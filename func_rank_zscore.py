@@ -60,7 +60,7 @@ print("Saved final results to 'df_top50_coint.csv'.")
 # 1) Identify all columns that end with "_zscore"
 zscore_cols = [col for col in final_df.columns if col.endswith("_zscore") and col != "datetime"]
 
-# 2) Get the last row for these columns (which should be numeric indices now)
+# 2) Get the last row for these columns.
 if not final_df.empty:
     last_row_index = final_df.index[-1]
     zscore_values = final_df.loc[last_row_index, zscore_cols]
@@ -68,14 +68,14 @@ if not final_df.empty:
     # 3) Build a Series mapping "sym1:sym2" -> zscore_value
     pairs_zscore = {}
     for col in zscore_cols:
-        # col might look like "XXX/USDT:YYY/USDT_zscore"
+        # Example: "BTC/USDT:ETH/USDT_zscore" becomes "BTC/USDT:ETH/USDT"
         pair_name = col.replace("_zscore", "")
         val = zscore_values[col]
         pairs_zscore[pair_name] = val
 
     zscore_series = pd.Series(pairs_zscore)
 
-    # 4) Sort descending to find highest, ascending for lowest
+    # 4) Sort descending to find highest and ascending for lowest.
     zscore_sorted = zscore_series.sort_values(ascending=False)
 
     # 5) Print top 10 highest
