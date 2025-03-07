@@ -1,3 +1,27 @@
+import traceback
+import time
+import ccxt
+import configparser
+import pandas as pd
+import numpy as np
+
+# Load API keys from a config file
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+api_key = config.get('BINANCE', 'API_KEY', fallback=None)
+api_secret = config.get('BINANCE', 'API_SECRET', fallback=None)
+
+# Initialize Binance exchange
+binance = ccxt.binance({
+    'apiKey': api_key,
+    'secret': api_secret,
+    'enableRateLimit': True,  # Enforce rate limits
+})
+
+# Synchronize time with Binance server
+binance.load_time_difference()
+
 # Function to perform internal transfer
 def internal_transfer(amount, transfer_type):
     """
