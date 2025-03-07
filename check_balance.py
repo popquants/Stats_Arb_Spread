@@ -12,6 +12,13 @@ config.read('config.ini')
 api_key = config.get('BINANCE', 'API_KEY', fallback=None)
 api_secret = config.get('BINANCE', 'API_SECRET', fallback=None)
 
+# Initialize Binance exchange
+binance = ccxt.binance({
+    'apiKey': api_key,
+    'secret': api_secret,
+    'enableRateLimit': True,  # Enforce rate limits
+})
+
 # Synchronize time with Binance server
 binance.load_time_difference()
 
