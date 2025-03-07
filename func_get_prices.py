@@ -1,7 +1,7 @@
 """
 Script to fetch 1h OHLCV data for USDT Perpetual pairs from Binance Futures,
 then pivot and compute pct_change for each pair's close price.
-Also, before processing, it checks that the sum of 'volume' in the last 24 hours is > 50,000,000.
+Also, before processing, it checks that each trading pair's volume in the last 24 hours is > 100,000,000.
 """
 
 import configparser
@@ -65,7 +65,7 @@ class BinanceFuturesDataFetcher:
             print("No USDT PERPETUAL pairs found. Exiting.")
             return None, None
 
-        # Calculate 'since' for the desired days ago
+        # Calculate 'since' for the desired days ago.
         since = int((datetime.utcnow() - timedelta(days=self.days)).timestamp() * 1000)
 
         all_data = []
@@ -88,12 +88,12 @@ class BinanceFuturesDataFetcher:
                     ohlcv,
                     columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
                 )
-                # Keep only timestamp, close, and volume
+                # Keep only timestamp, close, and volume.
                 df = df[['timestamp', 'close', 'volume']]
                 df['symbol'] = symbol
                 all_data.append(df)
 
-                # Respect rate limit
+                # Respect rate limit.
                 time.sleep(self.binance_futures.rateLimit / 1000)
 
             except ccxt.BadSymbol:
@@ -109,30 +109,37 @@ class BinanceFuturesDataFetcher:
             print("No data was fetched at all.")
             return None, None
 
-        # Concatenate fetched data into a single DataFrame.
+        # Concatenate fetched data into a single long-format DataFrame.
         self.final_df = pd.concat(all_data, ignore_index=True)
-        # print("\nLong-format DataFrame (timestamp, close, volume, symbol):")
-        # print(self.final_df.head())
+        print("\nLong-format DataFrame (timestamp, close, volume, symbol):")
+        print(self.final_df.head())
 
-        # --- Volume Check ---
-        # Convert 'timestamp' (ms) to datetime (tz-naive)
+        # --- Volume Check (Per Trading Pair) ---
+        # Convert 'timestamp' (ms) to datetime (tz-naive).
         self.final_df['timestamp'] = pd.to_datetime(self.final_df['timestamp'], unit='ms')
-        # Create a cutoff timestamp for the last 24 hours (tz-naive)
+        # Create cutoff timestamp for the last 24 hours (tz-naive).
         cutoff = (pd.Timestamp.utcnow() - pd.Timedelta(hours=24)).tz_localize(None)
         last_24 = self.final_df[self.final_df['timestamp'] >= cutoff]
-        volume_sum = last_24['volume'].sum()
-        if volume_sum <= 50000000:
-            print("Volume in the last 24 hours is less than 50,000,000. Exiting.")
+        # Group by symbol and sum the volume.
+        vol_by_symbol = last_24.groupby('symbol')['volume'].sum()
+        print("\nVolume by trading pair in the last 24 hours:")
+        print(vol_by_symbol)
+        # Only keep symbols with volume > 100,000,000.
+        valid_symbols = vol_by_symbol[vol_by_symbol > 100000000].index.tolist()
+        if not valid_symbols:
+            print("No trading pair has volume > 100,000,000 in the last 24 hours. Exiting.")
             return None, None
         else:
-            print(f"Volume in the last 24 hours: {volume_sum:.0f}")
+            print(f"\nTrading pairs meeting the volume criteria: {valid_symbols}")
+        # Filter final_df to only include rows for valid trading pairs.
+        self.final_df = self.final_df[self.final_df['symbol'].isin(valid_symbols)]
 
         # --- Pivoting to Wide Format ---
         self.wide_df = self.final_df.pivot(index='timestamp', columns='symbol', values='close')
         self.wide_df.sort_index(inplace=True)
         self.wide_df.columns.name = None
 
-        # Convert 'timestamp' from index to column for further processing.
+        # Convert index 'timestamp' from index to column for further processing.
         self.wide_df.reset_index(inplace=True)
         # Create a new 'datetime' column (example: adjust by adding 7 hours)
         self.wide_df['datetime'] = pd.to_datetime(self.wide_df['timestamp']) + pd.Timedelta(hours=7)
@@ -146,14 +153,14 @@ class BinanceFuturesDataFetcher:
         self.wide_df.set_index('datetime', inplace=True)
         self.wide_df.drop(columns=['timestamp'], inplace=True)
 
-        # --- Remove ':USDT' from column names ---
+        # --- Remove ':USDT' from column names (if present) ---
         self.wide_df.rename(
             columns=lambda c: c.replace(':USDT', ''),
             inplace=True
         )
 
         print("\nWide-format DataFrame with 'datetime' as index (timestamp dropped):")
-        # print(self.wide_df.head())
+        print(self.wide_df.head())
 
         # Compute percentage change for each pair's close price.
         self.trading_pct_change = self.wide_df.pct_change()
@@ -173,7 +180,7 @@ if __name__ == '__main__':
 
     if wide_df is not None and trading_pct_change is not None:
         print("\nTrading pct_change:")
-        # print(trading_pct_change.head())
+        print(trading_pct_change.head())
         
         # Save the dataframes to CSV files (including index which is datetime)
         wide_df.to_csv("wide_df.csv", index=True)
