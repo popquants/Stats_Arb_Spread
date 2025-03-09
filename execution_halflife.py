@@ -18,7 +18,7 @@ api_secret = config.get('BINANCE', 'API_SECRET', fallback=None)
 if not api_key or not api_secret:
     raise ValueError("API Key and Secret must be set in the config.ini file under the [BINANCE] section.")
 
-# Initialize the Binance API with auto time synchronization
+# Initialize the Binance Futures API with auto time synchronization
 binance_futures = ccxt.binanceusdm({
     'apiKey': api_key,
     'secret': api_secret,
@@ -82,20 +82,31 @@ def place_orders(long_pair, short_pair, long_amount, short_amount):
         traceback.print_exc()
         return []
 
-def close_orders(orders):
+def close_positions(orders):
     """
-    Closes the given orders by canceling them using the Binance Futures API.
+    Closes the active positions by placing reverse orders with the 'reduceOnly' flag.
+    This assumes that each order in 'orders' was fully executed.
     """
     try:
-        print("\n--- Closing Orders ---")
+        print("\n--- Closing Positions ---")
         for order in orders:
             symbol = order['symbol']
-            order_id = order['id']
-            print(f"Cancelling order {order_id} for {symbol}...")
-            cancel_result = binance_futures.cancel_order(order_id, symbol)
-            print(f"Order {order_id} cancelled. Result: {cancel_result}")
+            original_side = order['side']
+            # Determine the opposite side: sell to close a long, buy to close a short.
+            close_side = 'sell' if original_side == 'buy' else 'buy'
+            # Use the 'filled' amount if available; otherwise, fall back to the original 'amount'
+            amount = order.get('filled', order['amount'])
+            print(f"Closing position for {symbol}: placing {close_side} order for {amount:.4f}")
+            close_order = binance_futures.create_order(
+                symbol=symbol,
+                type='market',
+                side=close_side,
+                amount=amount,
+                params={'reduceOnly': True}
+            )
+            print(f"Close order placed for {symbol}: {close_order['id']} | Status: {close_order['status']}")
     except Exception as e:
-        print(f"Error closing orders: {e}")
+        print(f"Error closing positions: {e}")
         traceback.print_exc()
 
 def main():
@@ -127,7 +138,7 @@ def main():
     half_life_rounded = math.ceil(half_life_value)
     
     print(f"\nRetrieved half-life for {pair_key}: {half_life_value:.2f} hours (rounded up to {half_life_rounded} hours).")
-    user_choice = input(f"Do you want to close orders automatically after {half_life_rounded} hours? (yes/no): ").strip().lower()
+    user_choice = input(f"Do you want to close positions automatically after {half_life_rounded} hours? (yes/no): ").strip().lower()
     if user_choice != "yes":
         print("Auto-close cancelled. Exiting.")
         return
@@ -137,10 +148,10 @@ def main():
 
     # Schedule auto-close using the half-life value retrieved from the CSV.
     if placed_orders:
-        print(f"Waiting {half_life_rounded} hours to automatically close orders...")
+        print(f"Waiting {half_life_rounded} hours to automatically close positions...")
         time.sleep(half_life_rounded * 3600)
-        print("Half-life period reached. Closing orders...")
-        close_orders(placed_orders)
+        print("Half-life period reached. Closing positions...")
+        close_positions(placed_orders)
 
 if __name__ == "__main__":
     main()
