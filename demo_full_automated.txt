@@ -1,0 +1,331 @@
+import subprocess  # For running external Python scripts
+import time  # For time-related operations
+import pandas as pd  # For data manipulation
+from datetime import datetime  # For datetime operations
+import configparser  # For reading configuration files
+from songline import Sendline  # For sending LINE notifications
+import ccxt  # For Binance API interactions
+import logging  # For logging operations
+import os  # For file operations
+import json  # For JSON operations
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('trading_automated.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Load configuration from config.ini
+config = configparser.ConfigParser()
+config.read('config.ini')
+
+# Get API keys and LINE token from config
+api_key = config.get('BINANCE', 'API_KEY', fallback=None)
+api_secret = config.get('BINANCE', 'API_SECRET', fallback=None)
+line_token = config.get('LINE', 'TOKEN', fallback=None)
+
+if not all([api_key, api_secret, line_token]):
+    raise ValueError("API keys and LINE token must be set in config.ini")
+
+# Initialize Binance Futures client
+binance_futures = ccxt.binanceusdm({
+    'apiKey': api_key,
+    'secret': api_secret,
+    'enableRateLimit': True,
+    'options': {
+        'adjustForTimeDifference': True
+    }
+})
+
+# Initialize LINE notification client
+line = Sendline(line_token)
+
+def run_script(script_name):
+    """
+    Execute a Python script and return True if successful, False otherwise.
+    """
+    try:
+        result = subprocess.run(['python', script_name], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Successfully executed {script_name}")
+            return True
+        else:
+            logger.error(f"Error executing {script_name}:")
+            logger.error(result.stderr)
+            return False
+    except Exception as e:
+        logger.error(f"Exception while running {script_name}: {e}")
+        return False
+
+def get_futures_balance():
+    """
+    Get the total USDT balance in the futures wallet.
+    """
+    try:
+        balance = binance_futures.fetch_balance()
+        return float(balance['total']['USDT'])
+    except Exception as e:
+        logger.error(f"Error fetching futures balance: {e}")
+        return None
+
+def check_open_positions():
+    """
+    Check if there are any open positions in the futures account.
+    Returns True if positions exist, False otherwise.
+    """
+    try:
+        positions = binance_futures.fetch_positions()
+        for position in positions:
+            if float(position['contracts']) > 0:
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Error checking open positions: {e}")
+        return False
+
+def get_position_pnl():
+    """
+    Calculate the total unrealized PnL of open positions.
+    Returns the PnL as a percentage of total balance.
+    """
+    try:
+        positions = binance_futures.fetch_positions()
+        total_pnl = 0
+        for position in positions:
+            if float(position['contracts']) > 0:
+                total_pnl += float(position['unrealizedPnl'])
+        
+        balance = get_futures_balance()
+        if balance and balance > 0:
+            return (total_pnl / balance) * 100
+        return 0
+    except Exception as e:
+        logger.error(f"Error calculating position PnL: {e}")
+        return 0
+
+def get_best_trading_pair():
+    """
+    Read the results from df_top50_coint.csv and select the pair with the lowest z-score.
+    """
+    try:
+        df = pd.read_csv("df_top50_coint.csv")
+        last_row = df.iloc[-1]
+        
+        # Find the column with the lowest z-score
+        zscore_cols = [col for col in df.columns if col.endswith('_zscore')]
+        lowest_zscore_col = min(zscore_cols, key=lambda x: last_row[x])
+        
+        # Extract the pair from the column name
+        pair_name = lowest_zscore_col.replace('_zscore', '')
+        sym1, sym2 = pair_name.split(':')
+        
+        return sym1, sym2, last_row[lowest_zscore_col]
+    except Exception as e:
+        logger.error(f"Error selecting best trading pair: {e}")
+        return None, None, None
+
+def send_line_alert(message):
+    """
+    Send an alert to LINE.
+    """
+    try:
+        line.sendtext(message)
+        logger.info("LINE alert sent successfully")
+    except Exception as e:
+        logger.error(f"Error sending LINE alert: {e}")
+
+def wait_until_next_hour():
+    """
+    Wait until one minute past the next hour.
+    """
+    now = datetime.now()
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + pd.Timedelta(hours=1)
+    next_run = next_hour + pd.Timedelta(minutes=1)
+    wait_seconds = (next_run - now).total_seconds()
+    logger.info(f"Waiting {wait_seconds:.0f} seconds until next run at {next_run}")
+    time.sleep(wait_seconds)
+
+def get_hedge_ratio_and_mean_zscore(sym1, sym2):
+    """
+    Get hedge ratio and mean zscore for a trading pair.
+    """
+    try:
+        # Read cointegrated pairs data
+        df_coint = pd.read_csv("df_cointegrated_pairs.csv")
+        
+        # Find the pair in either order
+        pair_row = df_coint[
+            ((df_coint["sym_1"] == sym1) & (df_coint["sym_2"] == sym2)) |
+            ((df_coint["sym_1"] == sym2) & (df_coint["sym_2"] == sym1))
+        ]
+        
+        if pair_row.empty:
+            logger.error(f"No cointegration data found for pair {sym1}/{sym2}")
+            return None, None
+            
+        hedge_ratio = pair_row["hedge_ratio"].values[0]
+        
+        # Read mean zscore data
+        df_mean = pd.read_csv("df_mean_halflife.csv")
+        pair_key = f"{sym1}:{sym2}_mean_zscore"
+        if pair_key not in df_mean.columns:
+            pair_key = f"{sym2}:{sym1}_mean_zscore"  # Try reverse order
+            
+        if pair_key not in df_mean.columns:
+            logger.error(f"No mean zscore found for pair {sym1}/{sym2}")
+            return hedge_ratio, None
+            
+        mean_zscore = df_mean[pair_key].values[0]
+        
+        return hedge_ratio, mean_zscore
+        
+    except Exception as e:
+        logger.error(f"Error getting hedge ratio and mean zscore: {e}")
+        return None, None
+
+def get_current_zscore(sym1, sym2, hedge_ratio):
+    """
+    Calculate current z-score for a trading pair.
+    """
+    try:
+        # Get current prices
+        ticker1 = binance_futures.fetch_ticker(sym1)
+        ticker2 = binance_futures.fetch_ticker(sym2)
+        
+        price1 = ticker1['last']
+        price2 = ticker2['last']
+        
+        # Calculate spread
+        spread = price1 - (hedge_ratio * price2)
+        
+        # Get historical data for rolling statistics
+        ohlcv1 = binance_futures.fetch_ohlcv(sym1, timeframe='1h', limit=20)
+        ohlcv2 = binance_futures.fetch_ohlcv(sym2, timeframe='1h', limit=20)
+        
+        if len(ohlcv1) < 20 or len(ohlcv2) < 20:
+            logger.error("Not enough historical data for z-score calculation")
+            return None
+            
+        # Calculate historical spreads
+        historical_spreads = []
+        for i in range(20):
+            spread_i = ohlcv1[i][4] - (hedge_ratio * ohlcv2[i][4])
+            historical_spreads.append(spread_i)
+            
+        # Calculate mean and standard deviation
+        mean_spread = sum(historical_spreads) / len(historical_spreads)
+        std_spread = (sum((x - mean_spread) ** 2 for x in historical_spreads) / len(historical_spreads)) ** 0.5
+        
+        if std_spread == 0:
+            return 0.0
+            
+        # Calculate current z-score
+        current_zscore = (spread - mean_spread) / std_spread
+        return current_zscore
+        
+    except Exception as e:
+        logger.error(f"Error calculating current z-score: {e}")
+        return None
+
+def monitor_position(sym1, sym2, hedge_ratio, mean_zscore):
+    """
+    Monitor an open position until exit conditions are met.
+    """
+    logger.info(f"Starting position monitoring for {sym1}/{sym2}")
+    
+    while True:
+        try:
+            # Check stop-loss condition
+            pnl_percentage = get_position_pnl()
+            if pnl_percentage <= -5:
+                logger.warning(f"Stop-loss triggered at {pnl_percentage:.2f}% PnL")
+                send_line_alert(f"⚠️ Stop-loss triggered at {pnl_percentage:.2f}% PnL")
+                return True  # Position should be closed
+            
+            # Check mean-reversion condition
+            current_z = get_current_zscore(sym1, sym2, hedge_ratio)
+            if current_z is not None:
+                logger.info(f"Current z-score: {current_z:.2f}")
+                if abs(current_z - mean_zscore) <= 0.02:
+                    logger.info("Mean-reversion exit signal triggered")
+                    send_line_alert("✅ Mean-reversion exit signal triggered")
+                    return True  # Position should be closed
+            
+            time.sleep(300)  # Check every 5 minutes
+            
+        except Exception as e:
+            logger.error(f"Error in position monitoring: {e}")
+            time.sleep(300)  # Wait 5 minutes before retrying
+
+def main():
+    """
+    Main function to orchestrate the automated trading process.
+    """
+    logger.info("Starting Automated Trading System")
+    send_line_alert("🚀 Automated Trading System Started")
+    
+    while True:
+        try:
+            # Check for existing positions
+            if check_open_positions():
+                logger.info("Open positions detected, skipping pipeline")
+                time.sleep(300)  # Wait 5 minutes before checking again
+                continue
+            
+            # Run the analysis pipeline
+            scripts = [
+                'func_get_prices.py',
+                'func_cointegration.py',
+                'func_mean_halflife.py',
+                'func_rank_zscore.py'
+            ]
+            
+            success = True
+            for script in scripts:
+                if not run_script(script):
+                    success = False
+                    break
+            
+            if success:
+                # Get the best trading pair
+                sym1, sym2, zscore = get_best_trading_pair()
+                if sym1 and sym2:
+                    logger.info(f"Selected trading pair: {sym1}/{sym2} (z-score: {zscore:.2f})")
+                    
+                    # Get hedge ratio and mean zscore
+                    hedge_ratio, mean_zscore = get_hedge_ratio_and_mean_zscore(sym1, sym2)
+                    if hedge_ratio is None or mean_zscore is None:
+                        logger.error("Failed to get hedge ratio or mean zscore")
+                        continue
+                    
+                    # Get futures balance and calculate position sizes
+                    balance = get_futures_balance()
+                    if balance:
+                        position_size = balance * 0.5  # 50% of balance for each position
+                        
+                        # Execute trades using func_exec_mean_zscore.py
+                        if run_script('func_exec_mean_zscore.py'):
+                            logger.info("Trades executed successfully")
+                            send_line_alert(f"✅ Opened positions:\nLong: {sym1}\nShort: {sym2}")
+                            
+                            # Monitor the position
+                            monitor_position(sym1, sym2, hedge_ratio, mean_zscore)
+                        else:
+                            logger.error("Failed to execute trades")
+                            send_line_alert("❌ Failed to execute trades")
+            
+            # Wait until next hour
+            wait_until_next_hour()
+            
+        except Exception as e:
+            logger.error(f"Error in main loop: {e}")
+            send_line_alert(f"⚠️ Error in main loop: {str(e)}")
+            time.sleep(300)  # Wait 5 minutes before retrying
+
+if __name__ == "__main__":
+    main()
